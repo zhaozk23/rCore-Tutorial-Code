@@ -22,7 +22,8 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
-
+/// Max syscall id
+pub const MAX_SYSCALL: usize = 512;
 /// The task manager, where all the tasks are managed.
 ///
 /// Functions implemented on `TaskManager` deals with all task state transitions
@@ -45,6 +46,7 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    syscall_cnt: [[usize; MAX_SYSCALL]; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -55,7 +57,7 @@ lazy_static! {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
         }; MAX_APP_NUM];
-        for (i, task) in tasks.iter_mut().enumerate() {
+        for (i, task) in tasks.iter_mut().enumerate().take(num_app) {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
@@ -65,6 +67,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_cnt: [[0;MAX_SYSCALL];MAX_APP_NUM],
                 })
             },
         }
@@ -134,6 +137,25 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+    
+    /// Increase syscall count by 1 for current task
+    pub fn incr_syscall_count(&self, syscall_id: usize) {
+        if syscall_id < MAX_SYSCALL {
+            let mut inner = self.inner.exclusive_access();
+            let current = inner.current_task;
+            inner.syscall_cnt[current][syscall_id] += 1;
+        }
+    }
+
+    /// Get syscall count for current task
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        if syscall_id >= MAX_SYSCALL {
+            return 0;
+        }
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.syscall_cnt[cur][syscall_id]
     }
 }
 
