@@ -14,6 +14,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
@@ -46,6 +47,7 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+    syscall_cnt: Vec<[usize; MAX_SYSCALL_NUM]>,
 }
 
 lazy_static! {
@@ -55,8 +57,10 @@ lazy_static! {
         let num_app = get_num_app();
         println!("num_app = {}", num_app);
         let mut tasks: Vec<TaskControlBlock> = Vec::new();
+        let mut syscall_cnt: Vec<[usize; MAX_SYSCALL_NUM]> = Vec::new();
         for i in 0..num_app {
             tasks.push(TaskControlBlock::new(get_app_data(i), i));
+            syscall_cnt.push([0; MAX_SYSCALL_NUM]);
         }
         TaskManager {
             num_app,
@@ -64,6 +68,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_cnt,
                 })
             },
         }
@@ -152,6 +157,30 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    pub fn get_tcb(&self, id: usize) -> TaskControlBlock {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[id]
+    }
+
+    /// Increase syscall count by 1 for current task
+    pub fn incr_syscall_count(&self, syscall_id: usize) {
+        if syscall_id < MAX_SYSCALL_NUM {
+            let mut inner = self.inner.exclusive_access();
+            let current = inner.current_task;
+            inner.syscall_cnt[current][syscall_id] += 1;
+        }
+    }
+
+    /// Get syscall count for current task
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return 0;
+        }
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.syscall_cnt[cur][syscall_id]
     }
 }
 
