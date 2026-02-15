@@ -182,6 +182,11 @@ impl TaskManager {
         let cur = inner.current_task;
         inner.syscall_cnt[cur][syscall_id]
     }
+
+    pub fn get_current_tcb(&self) -> TaskControlBlock {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task]
+    }
 }
 
 /// Run the first task in task list.

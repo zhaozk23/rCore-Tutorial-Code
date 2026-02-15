@@ -1,6 +1,6 @@
 //! Process management syscalls
 
-use crate::{config::PAGE_SIZE, mm::{MapPermission, PageTable, VirtPageNum}, task::{TASK_MANAGER, change_program_brk, current_user_token, exit_current_and_run_next, suspend_current_and_run_next}, timer::get_time_us};
+use crate::{config::PAGE_SIZE, mm::{MapPermission, PageTable, VirtAddr, VirtPageNum}, task::{TASK_MANAGER, change_program_brk, current_user_token, exit_current_and_run_next, suspend_current_and_run_next}, timer::get_time_us};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -100,13 +100,55 @@ pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
     if (_port & 0x7 == 0 || _port & !0x7 != 0) {
         return -1;
     }
-    -1
+    let len = (_len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+    let end = _start + len;
+    let cur_areas = TASK_MANAGER.get_current_tcb().memory_set.areas;
+    for area in cur_areas {
+        let vpn_range = area.vpn_range;
+        if (vpn_range.get_start() <= _start / PAGE_SIZE && _start / PAGE_SIZE <= vpn_range.get_end()) {
+            return -1;
+        }
+        if (vpn_range.get_start() <= end / PAGE_SIZE && end / PAGE_SIZE<= vpn_range.get_end()){
+            return -1;
+        }
+    }
+
+    let mut permission = MapPermission::U;
+    if (_port & 1 != 0) {
+        permission |= MapPermission::R;
+    }
+    if (_port & 2 != 0) {
+        permission |= MapPermission::W;
+    }
+    if (_port & 4 != 0) {
+        permission |= MapPermission::X;
+    }
+    TASK_MANAGER.get_current_tcb().memory_set.insert_framed_area(VirtAddr(_start), VirtAddr(end), permission);
+    0
 }
 
 // YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
     trace!("kernel: sys_munmap");
-    -1
+    if (_start % PAGE_SIZE != 0) {
+        return -1;
+    }
+    let len = (_len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+    let end = _start + len;
+    let found = false;
+    let cur_areas = TASK_MANAGER.get_current_tcb().memory_set.areas;
+    for area in cur_areas {
+        let vpn_range = area.vpn_range;
+        if (vpn_range.get_start() == _start / PAGE_SIZE && end / PAGE_SIZE == vpn_range.get_end()) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return -1;
+    }
+    TASK_MANAGER.get_current_tcb().memory_set.unmap_area(VirtAddr(_start), VirtAddr(end));
+    0
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
