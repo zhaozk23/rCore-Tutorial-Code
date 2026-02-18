@@ -2,12 +2,10 @@
 use alloc::sync::Arc;
 
 use crate::{
-    loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
-    task::{
+    config::PAGE_SIZE, loader::get_app_data_by_name, mm::{translated_refmut, translated_str}, task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
-    },
+    }
 };
 
 #[repr(C)]
@@ -102,33 +100,96 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
+fn virtual_to_phys(virt: usize) -> *const u8 {
+    let token = current_user_token();
+    let vpn = virt / PAGE_SIZE;
+    let offset = virt % PAGE_SIZE;
+    let p_table = PageTable::from_token(token);
+    let pte = p_table.translate(vpn.into()).unwrap();
+    let ppn = pte.ppn().get_bytes_array().as_ptr();
+    unsafe {
+        ppn.add(offset)
+    }
+}
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().pid.0
     );
-    -1
+    let ts = unsafe {
+        virtual_to_phys(_ts as usize) as *mut TimeVal
+    };
+    unsafe {
+        *ts = TimeVal { sec: us / 1_000_000, usec: us % 1_000_000, }
+    } 
+    0
 }
+
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_mmap",
         current_task().unwrap().pid.0
     );
-    -1
+    let mut memory_set = current_task().unwrap().get_memory_set();
+    let len = (_len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+    let end = _start + len;
+    let cur_areas = memory_set.areas;
+    for area in cur_areas {
+        let vpn_range = area.vpn_range;
+        if (vpn_range.get_start().0 <= _start / PAGE_SIZE && _start / PAGE_SIZE <= vpn_range.get_end().0) {
+            return -1;
+        }
+        if (vpn_range.get_start().0 <= end / PAGE_SIZE && end / PAGE_SIZE<= vpn_range.get_end().0){
+            return -1;
+        }
+    }
+
+    let mut permission = MapPermission::U;
+    if (_port & 1 != 0) {
+        permission |= MapPermission::R;
+    }
+    if (_port & 2 != 0) {
+        permission |= MapPermission::W;
+    }
+    if (_port & 4 != 0) {
+        permission |= MapPermission::X;
+    }
+    
+    memory_set.insert_framed_area(_start.into(), end.into(), permission);
+    0
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_munmap",
         current_task().unwrap().pid.0
     );
-    -1
+    if (_start % PAGE_SIZE != 0) {
+        return -1;
+    }
+    let mut memory_set = current_task().unwrap().get_memory_set();
+    let len = (_len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+    let end = _start + len;
+    let mut found = false;
+    let cur_areas = memory_set.areas;
+    for area in cur_areas {
+        let vpn_range = area.vpn_range;
+        if (vpn_range.get_start().0 == _start / PAGE_SIZE && end / PAGE_SIZE == vpn_range.get_end().0) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return -1;
+    }
+    memory_set.unmap_area(_start.into(), end.into());
+    0
 }
 
 /// change data segment size
