@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -26,6 +26,7 @@ pub struct OSInode {
 pub struct OSInodeInner {
     offset: usize,
     inode: Arc<Inode>,
+    nlink: usize,
 }
 
 impl OSInode {
@@ -34,7 +35,7 @@ impl OSInode {
         Self {
             readable,
             writable,
-            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
+            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode, nlink: 1}) },
         }
     }
     /// read all data from the inode
@@ -155,5 +156,32 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn stat(&self) -> Stat {
+        let inner = self.inner.exclusive_access();
+        Stat {
+            dev: 0,
+            ino: (inner.inode.block_id << 32 | inner.inode.block_offset) as u64,
+            mode: if self.readable || self.writable {
+                StatMode::FILE
+            } else {
+                StatMode::DIR
+            },
+            nlink: inner.nlink as u32,
+            pad: [0; 7],
+        }
+    }
+    fn decr_nlink(&self, delta: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        if delta > inner.nlink {
+            return false;
+        }
+        inner.nlink -= delta;
+        true
+    }
+    fn incr_nlink(&self, delta: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        inner.nlink += delta;
+        true
     }
 }
