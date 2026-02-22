@@ -6,6 +6,8 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
+use alloc::collections::btree_map::BTreeMap;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -91,6 +93,11 @@ pub struct TaskControlBlockInner {
 
     /// stride algorithm pass
     pub pass: usize,
+
+    /// links (map of name and path)
+    pub links: BTreeMap<String, String>,
+    /// find fd by name (use BTreeMap)
+    pub names: BTreeMap<String, usize>,
 }
 
 impl TaskControlBlockInner {
@@ -158,6 +165,8 @@ impl TaskControlBlock {
                     priority: INIT_PRIORITY,
                     stride: 0,
                     pass: BIG_STRIDE_NUM / INIT_PRIORITY,
+                    links: BTreeMap::new(),
+                    names: BTreeMap::new(),
                 })
             },
         };
@@ -242,6 +251,8 @@ impl TaskControlBlock {
                     priority: parent_inner.priority,
                     stride: 0,
                     pass: BIG_STRIDE_NUM / parent_inner.priority,
+                    links: parent_inner.links,
+                    names: parent_inner.names,
                 })
             },
         });
@@ -305,6 +316,8 @@ impl TaskControlBlock {
                     stride: 0,
                     pass: BIG_STRIDE_NUM / parent_inner.priority,
                     fd_table,
+                    links: parent_inner.links,
+                    names: parent_inner.names,
                 })
             },
         });
