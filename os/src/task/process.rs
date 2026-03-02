@@ -49,6 +49,14 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// enable deadlock check
+    pub deadlock_detect_enabled: bool,
+    /// mutex owner
+    pub mutex_owner: Vec<Option<usize>>,
+    /// semaphore allocation
+    pub semaphore_alloc: Vec<Vec<usize>>,
+    /// total semaphore count
+    pub semaphore_count: Vec<usize>,
 }
 
 impl ProcessControlBlockInner {
@@ -68,11 +76,41 @@ impl ProcessControlBlockInner {
     }
     /// allocate a new task id
     pub fn alloc_tid(&mut self) -> usize {
-        self.task_res_allocator.alloc()
+        let tid = self.task_res_allocator.alloc();
+        for col in self.semaphore_alloc.iter_mut() {
+            if col.len() <= tid {
+                col.resize(tid + 1, 0);
+            }
+        }
+        tid
     }
     /// deallocate a task id
     pub fn dealloc_tid(&mut self, tid: usize) {
-        self.task_res_allocator.dealloc(tid)
+        self.task_res_allocator.dealloc(tid);
+        for col in self.semaphore_alloc.iter_mut() {
+            if tid < col.len() {
+                col[tid] = 0;
+            }
+        }
+    }
+    pub fn ensure_mutex_owner_len(&mut self) {
+        while self.mutex_owner.len() < self.mutex_list.len() {
+            self.mutex_owner.push(None);
+        }
+    }
+    pub fn ensure_semaphore_alloc_len(&mut self) {
+        let n = self.thread_count();
+        while self.semaphore_alloc.len() < self.semaphore_list.len() {
+            self.semaphore_alloc.push(vec![0; n]);
+        }
+        for col in self.semaphore_alloc.iter_mut() {
+            if col.len() < n {
+                col.resize(n, 0);
+            }
+        }
+        while self.semaphore_count.len() < self.semaphore_list.len() {
+            self.semaphore_count.push(0);
+        }
     }
     /// the count of tasks(threads) in this process
     pub fn thread_count(&self) -> usize {
@@ -81,6 +119,109 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    pub fn will_deadlock_mutex(&self, req_tid: usize, req_mutex: usize) -> bool {
+        let m = self.mutex_owner.len();
+        let n = self.thread_count();
+        if req_mutex >= m || req_tid >= n {
+            return false;
+        }
+        // Available: 若 mutex 未被占有则 1，否则 0
+        let mut work = vec![0usize; m];
+        for j in 0..m {
+            work[j] = if self.mutex_owner[j].is_none() { 1 } else { 0 };
+        }
+        // Allocation: allocation[i][j] = 1 当 owner[j] == Some(i)
+        let mut allocation = vec![vec![0usize; m]; n];
+        for j in 0..m {
+            if let Some(owner) = self.mutex_owner[j] {
+                if owner < n {
+                    allocation[owner][j] = 1;
+                }
+            }
+        }
+        // Need: 默认 0，仅将当前请求视为 need[req_tid][req_mutex] = 1（简化）
+        if allocation[req_tid][req_mutex] == 1 {
+            // 若请求的是已持有的 mutex （重入或重复请求），视为不构成死锁
+            return false;
+        }
+        let mut need = vec![vec![0usize; m]; n];
+        need[req_tid][req_mutex] = 1;
+
+        // Banker's safety algorithm
+        let mut finish = vec![false; n];
+        loop {
+            let mut progressed = false;
+            for i in 0..n {
+                if !finish[i] {
+                    let can_run = (0..m).all(|j| need[i][j] <= work[j]);
+                    if can_run {
+                        for j in 0..m {
+                            work[j] += allocation[i][j];
+                        }
+                        finish[i] = true;
+                        progressed = true;
+                    }
+                }
+            }
+            if !progressed { break; }
+        }
+        !finish.iter().all(|&x| x)
+    }
+    pub fn will_deadlock_semaphore(&self, req_tid: usize, sem_id: usize, req_cnt: usize) -> bool {
+        let m = self.semaphore_alloc.len();
+        let n = self.thread_count();
+        if sem_id >= m || req_tid >= n {
+            return false;
+        }
+        // Available[j] = total[j] - sum_{i} allocation[i][j]
+        let mut work = vec![0usize; m];
+        for j in 0..m {
+            let total = self.semaphore_count.get(j).cloned().unwrap_or(0);
+            let mut used = 0usize;
+            if j < self.semaphore_alloc.len() {
+                for i in 0..n {
+                    if i < self.semaphore_alloc[j].len() {
+                        used += self.semaphore_alloc[j][i];
+                    }
+                }
+            }
+            if total < used { work[j] = 0; } else { work[j] = total - used; }
+        }
+        // Allocation: allocation[i][j] = semaphore_alloc[j][i]
+        let mut allocation = vec![vec![0usize; m]; n];
+        for j in 0..m {
+            if j < self.semaphore_alloc.len() {
+                for i in 0..n {
+                    if i < self.semaphore_alloc[j].len() {
+                        allocation[i][j] = self.semaphore_alloc[j][i];
+                    }
+                }
+            }
+        }
+        // Need: 默认 0，仅把当前请求设为 need[req_tid][sem_id] = req_cnt
+        let mut need = vec![vec![0usize; m]; n];
+        need[req_tid][sem_id] = req_cnt;
+
+        // Banker's safety algorithm
+        let mut finish = vec![false; n];
+        loop {
+            let mut progressed = false;
+            for i in 0..n {
+                if !finish[i] {
+                    let can_run = (0..m).all(|j| need[i][j] <= work[j]);
+                    if can_run {
+                        for j in 0..m {
+                            work[j] += allocation[i][j];
+                        }
+                        finish[i] = true;
+                        progressed = true;
+                    }
+                }
+            }
+            if !progressed { break; }
+        }
+        !finish.iter().all(|&x| x)
     }
 }
 
@@ -119,6 +260,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_owner: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_count: Vec::new(),
                 })
             },
         });
@@ -245,6 +390,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_owner: Vec::new(),
+                    semaphore_alloc: Vec::new(),
+                    semaphore_count: Vec::new(),
                 })
             },
         });
